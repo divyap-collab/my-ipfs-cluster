@@ -273,7 +273,7 @@ func (mock *mockCluster) StatusAll(ctx context.Context, in <-chan api.TrackerSta
 		{
 			Cid:  Cid3,
 			Name: "ccc",
-			Metadata: map[string]string{
+			Metadata: map[string]any{
 				"ccc": "3c",
 			},
 			PeerMap: map[string]api.PinInfoShort{
@@ -318,7 +318,7 @@ func (mock *mockCluster) Status(ctx context.Context, in api.Cid, out *api.Global
 		Name:        "test",
 		Allocations: nil,
 		Origins:     nil,
-		Metadata: map[string]string{
+		Metadata: map[string]any{
 			"meta": "data",
 		},
 

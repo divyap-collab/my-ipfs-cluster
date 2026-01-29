@@ -352,7 +352,7 @@ type GlobalPinInfo struct {
 	Allocations []peer.ID         `json:"allocations" codec:"a,omitempty"`
 	Origins     []Multiaddr       `json:"origins" codec:"g,omitempty"`
 	Created     time.Time         `json:"created" codec:"t,omitempty"`
-	Metadata    map[string]string `json:"metadata" codec:"m,omitempty"`
+	Metadata    map[string]any    `json:"metadata" codec:"m,omitempty"`
 
 	// https://github.com/golang/go/issues/28827
 	// Peer IDs are of string Kind(). We can't use peer IDs here
@@ -439,7 +439,7 @@ type PinInfo struct {
 	Allocations []peer.ID         `json:"allocations" codec:"o,omitempty"`
 	Origins     []Multiaddr       `json:"origins" codec:"g,omitempty"`
 	Created     time.Time         `json:"created" codec:"t,omitempty"`
-	Metadata    map[string]string `json:"metadata" codec:"md,omitempty"`
+	Metadata    map[string]any `json:"metadata" codec:"md,omitempty"`
 
 	PinInfoShort
 }
@@ -760,9 +760,28 @@ type PinOptions struct {
 	ShardSize            uint64            `json:"shard_size" codec:"s,omitempty"`
 	UserAllocations      []peer.ID         `json:"user_allocations" codec:"ua,omitempty"`
 	ExpireAt             time.Time         `json:"expire_at" codec:"e,omitempty"`
-	Metadata             map[string]string `json:"metadata" codec:"m,omitempty"`
+	Metadata             map[string]any    `json:"metadata" codec:"m,omitempty"`
 	PinUpdate            Cid               `json:"pin_update,omitempty" codec:"pu,omitempty"`
 	Origins              []Multiaddr       `json:"origins" codec:"g,omitempty"`
+}
+
+// metadataValueEqual compares two metadata values for equality.
+// It handles different types by comparing their JSON representations.
+func metadataValueEqual(v1, v2 any) bool {
+	if v1 == nil && v2 == nil {
+		return true
+	}
+	if v1 == nil || v2 == nil {
+		return false
+	}
+	// Use JSON comparison for complex types
+	json1, err1 := json.Marshal(v1)
+	json2, err2 := json.Marshal(v2)
+	if err1 != nil || err2 != nil {
+		// If marshaling fails, do direct comparison
+		return v1 == v2
+	}
+	return string(json1) == string(json2)
 }
 
 // Equals returns true if two PinOption objects are equivalent. po and po2 may
@@ -808,8 +827,14 @@ func (po PinOptions) Equals(po2 PinOptions) bool {
 	}
 
 	for k, v := range po.Metadata {
-		v2 := po2.Metadata[k]
-		if k != "" && v != v2 {
+		v2, exists := po2.Metadata[k]
+		if k != "" && (!exists || !metadataValueEqual(v, v2)) {
+			return false
+		}
+	}
+	// Check for keys in po2 that don't exist in po
+	for k := range po2.Metadata {
+		if _, exists := po.Metadata[k]; !exists {
 			return false
 		}
 	}
@@ -857,7 +882,18 @@ func (po PinOptions) ToQuery() (string, error) {
 		if k == "" {
 			continue
 		}
-		q.Set(fmt.Sprintf("%s%s", pinOptionsMetaPrefix, k), v)
+		// Serialize value as JSON if it's not already a string
+		var valueStr string
+		if strVal, ok := v.(string); ok {
+			valueStr = strVal
+		} else {
+			jsonBytes, err := json.Marshal(v)
+			if err != nil {
+				return "", fmt.Errorf("error marshaling metadata value for key %s: %w", k, err)
+			}
+			valueStr = string(jsonBytes)
+		}
+		q.Set(fmt.Sprintf("%s%s", pinOptionsMetaPrefix, k), valueStr)
 	}
 	if po.PinUpdate.Defined() {
 		q.Set("pin-update", po.PinUpdate.String())
@@ -926,7 +962,7 @@ func (po *PinOptions) FromQuery(q url.Values) error {
 		po.ExpireAt = time.Now().Add(d)
 	}
 
-	po.Metadata = make(map[string]string)
+	po.Metadata = make(map[string]any)
 	for k := range q {
 		if !strings.HasPrefix(k, pinOptionsMetaPrefix) {
 			continue
@@ -935,7 +971,14 @@ func (po *PinOptions) FromQuery(q url.Values) error {
 		if metaKey == "" {
 			continue
 		}
-		po.Metadata[metaKey] = q.Get(k)
+		valueStr := q.Get(k)
+		// Try to parse as JSON first, if that fails, treat as string
+		var value any
+		if err := json.Unmarshal([]byte(valueStr), &value); err != nil {
+			// Not valid JSON, treat as plain string
+			value = valueStr
+		}
+		po.Metadata[metaKey] = value
 	}
 
 	updateStr := q.Get("pin-update")
@@ -1119,9 +1162,20 @@ func (pin Pin) ProtoMarshal() ([]byte, error) {
 	sort.Strings(metaKeys)
 
 	for _, k := range metaKeys {
+		// Serialize value as JSON string if it's not already a string
+		var valueStr string
+		if strVal, ok := pin.Metadata[k].(string); ok {
+			valueStr = strVal
+		} else {
+			jsonBytes, err := json.Marshal(pin.Metadata[k])
+			if err != nil {
+				return nil, fmt.Errorf("error marshaling metadata value for key %s: %w", k, err)
+			}
+			valueStr = string(jsonBytes)
+		}
 		metadata := &pb.Metadata{
 			Key:   k,
-			Value: pin.Metadata[k],
+			Value: valueStr,
 		}
 		sortedMetadata = append(sortedMetadata, metadata)
 	}
@@ -1210,13 +1264,28 @@ func (pin *Pin) ProtoUnmarshal(data []byte) error {
 
 	// Use whatever metadata is available.
 	//lint:ignore SA1019 we keed to keep backwards compat
-	pin.Metadata = opts.GetMetadata()
+	legacyMetadata := opts.GetMetadata()
 	sortedMetadata := opts.GetSortedMetadata()
 	if len(sortedMetadata) > 0 && pin.Metadata == nil {
-		pin.Metadata = make(map[string]string, len(sortedMetadata))
+		pin.Metadata = make(map[string]any, len(sortedMetadata))
+	}
+	// Convert legacy map[string]string to map[string]any
+	if legacyMetadata != nil && len(legacyMetadata) > 0 {
+		if pin.Metadata == nil {
+			pin.Metadata = make(map[string]any, len(legacyMetadata))
+		}
+		for k, v := range legacyMetadata {
+			pin.Metadata[k] = v
+		}
 	}
 	for _, md := range opts.GetSortedMetadata() {
-		pin.Metadata[md.Key] = md.Value
+		// Try to parse value as JSON, if that fails, treat as string
+		var value any
+		if err := json.Unmarshal([]byte(md.Value), &value); err != nil {
+			// Not valid JSON, treat as plain string
+			value = md.Value
+		}
+		pin.Metadata[md.Key] = value
 	}
 
 	pinUpdate, err := CastCid(opts.GetPinUpdate())

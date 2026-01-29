@@ -14,7 +14,9 @@ RUN go mod download -x
 COPY --chown=1000:users . $SRC_PATH
 RUN git config --global --add safe.directory /go/src/github.com/ipfs-cluster/ipfs-cluster
 
+# Disable git commit embedding by overriding commit to empty
 ENV CGO_ENABLED=0
+ENV COMMIT=""
 RUN GOOS=$TARGETOS GOARCH=$TARGETARCH make build
 
 #------------------------------------------------------
