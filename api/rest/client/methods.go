@@ -257,10 +257,20 @@ func (c *defaultClient) StatusCids(ctx context.Context, cids []api.Cid, local bo
 // a bitwise OR operation (st1 | st2 | ...). A "0" filter value (or
 // api.TrackerStatusUndefined), means all.
 func (c *defaultClient) StatusAll(ctx context.Context, filter api.TrackerStatus, local bool, out chan<- api.GlobalPinInfo) error {
-	return c.statusAllWithCids(ctx, filter, nil, local, out)
+	return c.statusAllWithCidsAndMetadata(ctx, filter, nil, nil, local, out)
+}
+
+// StatusAllWithMetadata gathers Status() for all tracked items, with optional metadata filtering.
+// The metadata parameter is a map of key-value pairs that must all match for a pin to be included.
+func (c *defaultClient) StatusAllWithMetadata(ctx context.Context, filter api.TrackerStatus, metadata map[string]string, local bool, out chan<- api.GlobalPinInfo) error {
+	return c.statusAllWithCidsAndMetadata(ctx, filter, metadata, nil, local, out)
 }
 
 func (c *defaultClient) statusAllWithCids(ctx context.Context, filter api.TrackerStatus, cids []api.Cid, local bool, out chan<- api.GlobalPinInfo) error {
+	return c.statusAllWithCidsAndMetadata(ctx, filter, nil, cids, local, out)
+}
+
+func (c *defaultClient) statusAllWithCidsAndMetadata(ctx context.Context, filter api.TrackerStatus, metadata map[string]string, cids []api.Cid, local bool, out chan<- api.GlobalPinInfo) error {
 	defer close(out)
 	ctx, span := trace.StartSpan(ctx, "client/StatusAll")
 	defer span.End()
@@ -271,6 +281,16 @@ func (c *defaultClient) statusAllWithCids(ctx context.Context, filter api.Tracke
 		if filterStr == "" {
 			return errors.New("invalid filter value")
 		}
+	}
+
+	// Build metadata filter string (format: "key1:value1,key2:value2")
+	metadataStr := ""
+	if len(metadata) > 0 {
+		pairs := make([]string, 0, len(metadata))
+		for k, v := range metadata {
+			pairs = append(pairs, fmt.Sprintf("%s:%s", k, v))
+		}
+		metadataStr = strings.Join(pairs, ",")
 	}
 
 	cidsStr := make([]string, len(cids))
@@ -291,8 +311,8 @@ func (c *defaultClient) statusAllWithCids(ctx context.Context, filter api.Tracke
 	return c.doStream(
 		ctx,
 		"GET",
-		fmt.Sprintf("/pins?local=%t&filter=%s&cids=%s",
-			local, url.QueryEscape(filterStr), strings.Join(cidsStr, ",")),
+		fmt.Sprintf("/pins?local=%t&filter=%s&metadata=%s&cids=%s",
+			local, url.QueryEscape(filterStr), url.QueryEscape(metadataStr), strings.Join(cidsStr, ",")),
 		nil,
 		nil,
 		handler,

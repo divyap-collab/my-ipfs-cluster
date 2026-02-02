@@ -424,7 +424,7 @@ func TestStatusAll(t *testing.T) {
 	// * Cid1 is pinned
 	// * Cid4 should be in PinError (it's in the state but not on IPFS)
 	stAll := make(chan api.PinInfo, 10)
-	err = spt.StatusAll(ctx, api.TrackerStatusUndefined, stAll)
+	err = spt.StatusAll(ctx, api.NewStatusFilter(api.TrackerStatusUndefined), stAll)
 	if err != nil {
 		t.Fatal(err)
 	}
