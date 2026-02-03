@@ -957,10 +957,6 @@ func (api *API) statusAllHandler(w http.ResponseWriter, r *http.Request) {
 	hasMetadataFilter := len(metadataFilter) > 0
 	logger.Infof("statusAllHandler: hasMetadataFilter=%v, metadataFilter=%+v", hasMetadataFilter, metadataFilter)
 
-	// Debug header to verify filter is being parsed (remove in production)
-	w.Header().Set("X-Debug-MetadataStr", metadataStr)
-	w.Header().Set("X-Debug-HasFilter", fmt.Sprintf("%v", hasMetadataFilter))
-
 	var iter common.StreamIterator
 	in := make(chan types.StatusFilter, 1)
 	in <- filter
@@ -1147,7 +1143,14 @@ func (api *API) statusCidsHandler(w http.ResponseWriter, r *http.Request) {
 
 	iter := func() (interface{}, bool, error) {
 		gpi, ok := <-gpiCh
-		return gpi, ok, nil
+		if !ok {
+			return nil, false, nil
+		}
+		// Normalize metadata so JSON encoding works (RPC may return map[interface{}]interface{})
+		if gpi.Metadata != nil {
+			gpi.Metadata = normalizeMetadata(gpi.Metadata)
+		}
+		return gpi, true, nil
 	}
 
 	api.StreamResponse(w, iter, errCh)
