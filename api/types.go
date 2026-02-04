@@ -336,16 +336,25 @@ func (sf StatusFilter) HasMetadataFilter() bool {
 	return len(sf.Metadata) > 0 || sf.MetadataFilterStr != ""
 }
 
-// parseRangeValue parses value as either "[min,max]" (inclusive range) or exact.
+// parseRangeValue parses value as "[min,max]" or "[min max]" (inclusive range) or exact.
 // Returns MetadataFilterValue with either Exact set or Min/Max set.
+// Accepts comma or whitespace as separator inside brackets.
 func parseRangeValue(value string) MetadataFilterValue {
 	value = strings.TrimSpace(value)
 	if len(value) >= 2 && value[0] == '[' && value[len(value)-1] == ']' {
 		inner := strings.TrimSpace(value[1 : len(value)-1])
-		comma := strings.Index(inner, ",")
-		if comma >= 0 {
-			min := strings.TrimSpace(inner[:comma])
-			max := strings.TrimSpace(inner[comma+1:])
+		var min, max string
+		if comma := strings.Index(inner, ","); comma >= 0 {
+			min = strings.TrimSpace(inner[:comma])
+			max = strings.TrimSpace(inner[comma+1:])
+		} else {
+			parts := strings.Fields(inner)
+			if len(parts) >= 2 {
+				min = parts[0]
+				max = parts[1]
+			}
+		}
+		if min != "" || max != "" {
 			return MetadataFilterValue{Min: min, Max: max}
 		}
 	}
@@ -381,7 +390,7 @@ func splitMetadataFilterPairs(str string) []string {
 // MetadataFilterFromString parses a metadata filter string in the format
 // "key1:value1,key2:[min,max],..." into a map. Returns nil if the string is empty.
 // Keys and values are trimmed of whitespace.
-// Range: use value "[min,max]" for inclusive range (e.g. "observation.bloodGlucose:[90,100]").
+// Range: use "[min,max]" or "[min max]" for inclusive range (e.g. "observation.bloodGlucose:[85,100]").
 // Exact: use "key:value" for exact match.
 func MetadataFilterFromString(str string) map[string]MetadataFilterValue {
 	if str == "" {
