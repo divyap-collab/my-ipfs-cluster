@@ -409,6 +409,7 @@ func normalizeMetadata(v any) map[string]any {
 		for k, v := range val {
 			result[k] = normalizeValue(v)
 		}
+		pruneEmptyMaps(result)
 		return result
 	case map[interface{}]interface{}:
 		// Convert map[interface{}]interface{} to map[string]any
@@ -420,9 +421,27 @@ func normalizeMetadata(v any) map[string]any {
 			}
 			result[key] = normalizeValue(v)
 		}
+		pruneEmptyMaps(result)
 		return result
 	default:
 		return nil
+	}
+}
+
+// pruneEmptyMaps removes keys whose value is an empty map (e.g. "observation": {}).
+// Nested maps are pruned first so a parent can become empty and then be removed.
+// Modifies m in place.
+func pruneEmptyMaps(m map[string]any) {
+	if m == nil {
+		return
+	}
+	for k, v := range m {
+		if child, ok := v.(map[string]any); ok {
+			pruneEmptyMaps(child)
+			if len(child) == 0 {
+				delete(m, k)
+			}
+		}
 	}
 }
 
