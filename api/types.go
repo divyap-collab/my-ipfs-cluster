@@ -243,6 +243,7 @@ func (sf StatusFilter) MatchStatus(st TrackerStatus) bool {
 
 // getNestedMetadataValue traverses nested maps using dot-separated path (e.g. "observation.bloodGlucose").
 // Returns (value, true) if found, (nil, false) otherwise.
+// Supports both map[string]any and map[interface{}]interface{} for nested maps (e.g. from RPC/state).
 func getNestedMetadataValue(metadata map[string]any, path string) (any, bool) {
 	if metadata == nil || path == "" {
 		return nil, false
@@ -250,17 +251,30 @@ func getNestedMetadataValue(metadata map[string]any, path string) (any, bool) {
 	parts := strings.Split(path, ".")
 	current := any(metadata)
 	for _, part := range parts {
-		m, ok := current.(map[string]any)
-		if !ok {
-			return nil, false
-		}
-		val, ok := m[part]
+		val, ok := getMapValue(current, part)
 		if !ok {
 			return nil, false
 		}
 		current = val
 	}
 	return current, true
+}
+
+// getMapValue returns m[key] supporting both map[string]any and map[interface{}]interface{}.
+func getMapValue(m any, key string) (any, bool) {
+	if m == nil {
+		return nil, false
+	}
+	switch v := m.(type) {
+	case map[string]any:
+		val, ok := v[key]
+		return val, ok
+	case map[interface{}]interface{}:
+		val, ok := v[key]
+		return val, ok
+	default:
+		return nil, false
+	}
 }
 
 // valueInRange returns true if actual (as string) is within [min, max] inclusive.
@@ -274,6 +288,20 @@ func valueInRange(actualStr, minStr, maxStr string) bool {
 	}
 	// Fallback: string comparison (works for ISO dates, zero-padded numbers, etc.)
 	return actualStr >= minStr && actualStr <= maxStr
+}
+
+// valueExactMatch returns true if actual value matches the exact filter (e.g. 90 matches "90", 90.0, "90.0").
+func valueExactMatch(actualStr, exactStr string) bool {
+	if actualStr == exactStr {
+		return true
+	}
+	// Numeric comparison so 90 (number) and "90" and 90.0 all match
+	actualF, errA := strconv.ParseFloat(actualStr, 64)
+	exactF, errE := strconv.ParseFloat(exactStr, 64)
+	if errA == nil && errE == nil {
+		return actualF == exactF
+	}
+	return false
 }
 
 // effectiveMetadata returns the metadata filter map, parsing MetadataFilterStr if Metadata is empty.
@@ -318,7 +346,7 @@ func (sf StatusFilter) MatchMetadata(metadata map[string]any) bool {
 				return false
 			}
 		} else {
-			if valStr != fv.Exact {
+			if !valueExactMatch(valStr, fv.Exact) {
 				return false
 			}
 		}
