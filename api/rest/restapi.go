@@ -1087,6 +1087,7 @@ func (api *API) statusAllHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // request statuses for multiple CIDs in parallel.
+// Supports metadata filter: only pins matching metadata (e.g. observation.bloodOxygen:96) are returned.
 func (api *API) statusCidsHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -1096,6 +1097,10 @@ func (api *API) statusCidsHandler(w http.ResponseWriter, r *http.Request) {
 	var cids []types.Cid
 
 	for _, cidStr := range filterCidsStr {
+		cidStr = strings.TrimSpace(cidStr)
+		if cidStr == "" {
+			continue
+		}
 		c, err := types.DecodeCid(cidStr)
 		if err != nil {
 			api.SendResponse(w, http.StatusBadRequest, fmt.Errorf("error decoding Cid: %w", err), nil)
@@ -1104,7 +1109,29 @@ func (api *API) statusCidsHandler(w http.ResponseWriter, r *http.Request) {
 		cids = append(cids, c)
 	}
 
+	if len(cids) == 0 {
+		api.SendResponse(w, http.StatusBadRequest, errors.New("at least one cid is required"), nil)
+		return
+	}
+
 	local := queryValues.Get("local")
+
+	// Parse metadata filter (same format as statusAllHandler)
+	metadataStr := queryValues.Get("metadata")
+	if metadataStr == "" {
+		for k, v := range queryValues {
+			if strings.EqualFold(k, "metadata") && len(v) > 0 {
+				metadataStr = v[0]
+				break
+			}
+		}
+	}
+	if metadataStr == "" && strings.Contains(r.URL.RawQuery, "metadata=") {
+		raw, _ := url.ParseQuery(r.URL.RawQuery)
+		metadataStr = raw.Get("metadata")
+	}
+	metadataFilter := types.MetadataFilterFromString(metadataStr)
+	hasMetadataFilter := len(metadataFilter) > 0
 
 	gpiCh := make(chan types.GlobalPinInfo, len(cids))
 	errCh := make(chan error, len(cids))
@@ -1161,15 +1188,24 @@ func (api *API) statusCidsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	iter := func() (interface{}, bool, error) {
-		gpi, ok := <-gpiCh
-		if !ok {
-			return nil, false, nil
+		for {
+			gpi, ok := <-gpiCh
+			if !ok {
+				return nil, false, nil
+			}
+			// Normalize metadata so JSON encoding works (RPC may return map[interface{}]interface{})
+			if gpi.Metadata != nil {
+				gpi.Metadata = normalizeMetadata(gpi.Metadata)
+			}
+			// Apply metadata filter: skip pins that don't match
+			if hasMetadataFilter {
+				sf := types.StatusFilter{Metadata: metadataFilter}
+				if !sf.MatchMetadata(gpi.Metadata) {
+					continue
+				}
+			}
+			return gpi, true, nil
 		}
-		// Normalize metadata so JSON encoding works (RPC may return map[interface{}]interface{})
-		if gpi.Metadata != nil {
-			gpi.Metadata = normalizeMetadata(gpi.Metadata)
-		}
-		return gpi, true, nil
 	}
 
 	api.StreamResponse(w, iter, errCh)
