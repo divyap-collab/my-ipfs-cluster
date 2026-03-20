@@ -697,7 +697,7 @@ func TestClustersPin(t *testing.T) {
 		out := make(chan api.PinInfo, 10)
 
 		go func() {
-			err := c.tracker.StatusAll(ctx, api.TrackerStatusUndefined, out)
+			err := c.tracker.StatusAll(ctx, api.NewStatusFilter(api.TrackerStatusUndefined), out)
 			if err != nil {
 				t.Error(err)
 			}
@@ -755,7 +755,7 @@ func TestClustersPin(t *testing.T) {
 	funpinned := func(t *testing.T, c *Cluster) {
 		out := make(chan api.PinInfo)
 		go func() {
-			err := c.tracker.StatusAll(ctx, api.TrackerStatusUndefined, out)
+			err := c.tracker.StatusAll(ctx, api.NewStatusFilter(api.TrackerStatusUndefined), out)
 			if err != nil {
 				t.Error(err)
 			}
@@ -907,7 +907,7 @@ func TestClustersStatusAll(t *testing.T) {
 	f := func(t *testing.T, c *Cluster) {
 		out := make(chan api.GlobalPinInfo, 10)
 		go func() {
-			err := c.StatusAll(ctx, api.TrackerStatusUndefined, out)
+			err := c.StatusAll(ctx, api.NewStatusFilter(api.TrackerStatusUndefined), out)
 			if err != nil {
 				t.Error(err)
 			}
@@ -980,7 +980,7 @@ func TestClustersStatusAllWithErrors(t *testing.T) {
 
 		out := make(chan api.GlobalPinInfo, 10)
 		go func() {
-			err := c.StatusAll(ctx, api.TrackerStatusUndefined, out)
+			err := c.StatusAll(ctx, api.NewStatusFilter(api.TrackerStatusUndefined), out)
 			if err != nil {
 				t.Error(err)
 			}
@@ -1290,7 +1290,7 @@ func TestClustersReplicationOverall(t *testing.T) {
 		out := make(chan api.PinInfo, 100)
 
 		go func() {
-			err := c.tracker.StatusAll(ctx, api.TrackerStatusUndefined, out)
+			err := c.tracker.StatusAll(ctx, api.NewStatusFilter(api.TrackerStatusUndefined), out)
 			if err != nil {
 				t.Error(err)
 			}

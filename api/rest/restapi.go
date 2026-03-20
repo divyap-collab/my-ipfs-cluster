@@ -15,6 +15,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -371,7 +372,7 @@ func (api *API) addHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		api.config.Logger.Debugf("addHandler: no metadata found in form body, using query params metadata: %+v", params.Metadata)
 	}
-	
+
 	api.config.Logger.Debugf("addHandler: final params before adding: Metadata=%+v, NoPin=%v", params.Metadata, params.NoPin)
 
 	api.SetHeaders(w)
@@ -400,7 +401,7 @@ func normalizeMetadata(v any) map[string]any {
 	if v == nil {
 		return nil
 	}
-	
+
 	switch val := v.(type) {
 	case map[string]any:
 		// Already the correct type, but normalize nested values
@@ -408,6 +409,7 @@ func normalizeMetadata(v any) map[string]any {
 		for k, v := range val {
 			result[k] = normalizeValue(v)
 		}
+		pruneEmptyMaps(result)
 		return result
 	case map[interface{}]interface{}:
 		// Convert map[interface{}]interface{} to map[string]any
@@ -419,9 +421,27 @@ func normalizeMetadata(v any) map[string]any {
 			}
 			result[key] = normalizeValue(v)
 		}
+		pruneEmptyMaps(result)
 		return result
 	default:
 		return nil
+	}
+}
+
+// pruneEmptyMaps removes keys whose value is an empty map (e.g. "observation": {}).
+// Nested maps are pruned first so a parent can become empty and then be removed.
+// Modifies m in place.
+func pruneEmptyMaps(m map[string]any) {
+	if m == nil {
+		return
+	}
+	for k, v := range m {
+		if child, ok := v.(map[string]any); ok {
+			pruneEmptyMaps(child)
+			if len(child) == 0 {
+				delete(m, k)
+			}
+		}
 	}
 }
 
@@ -430,14 +450,14 @@ func normalizeValue(v any) any {
 	if v == nil {
 		return nil
 	}
-	
+
 	// Check if it's a byte slice and convert to string
 	// Note: []byte and []uint8 are the same type in Go, so we only need one case
 	switch val := v.(type) {
 	case []byte:
 		return string(val)
 	}
-	
+
 	// Use reflection to handle slices generically since []interface{} and []any are the same
 	if reflect.TypeOf(v).Kind() == reflect.Slice {
 		rv := reflect.ValueOf(v)
@@ -480,7 +500,7 @@ func normalizeValue(v any) any {
 		}
 		return result
 	}
-	
+
 	switch val := v.(type) {
 	case map[string]any:
 		result := make(map[string]any, len(val))
@@ -599,7 +619,7 @@ func extractMetadataFromMultipart(reader *multipart.Reader) (string, *multipart.
 	// The buffer is automatically positioned at the start
 	boundary := writer.Boundary()
 	newReader := multipart.NewReader(&buf, boundary)
-	
+
 	return metadataJSON, newReader, hasFiles, nil
 }
 
@@ -811,8 +831,8 @@ func (api *API) updatePinMetadataHandler(w http.ResponseWriter, r *http.Request)
 		r.Context(),
 		"",
 		"Cluster",
-		"Pin",    // Reuse Pin RPC to update metadata
-		pinObj,  // pass full pin object with updated metadata
+		"Pin",  // Reuse Pin RPC to update metadata
+		pinObj, // pass full pin object with updated metadata
 		&updatedPin,
 	)
 	if err != nil {
@@ -906,6 +926,9 @@ func (api *API) statusAllHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	// Debug: log raw URL so we can verify query string reaches the handler
+	logger.Infof("statusAllHandler: request URL RawQuery='%s'", r.URL.RawQuery)
+
 	queryValues := r.URL.Query()
 	if queryValues.Get("cids") != "" {
 		api.statusCidsHandler(w, r)
@@ -914,52 +937,88 @@ func (api *API) statusAllHandler(w http.ResponseWriter, r *http.Request) {
 
 	local := queryValues.Get("local")
 
+	// Parse status filter
 	filterStr := queryValues.Get("filter")
-	filter := types.TrackerStatusFromString(filterStr)
-	logger.Infof("statusAllHandler: filterStr='%s', filter=%s (value=%d), local=%s", filterStr, filter.String(), filter, local)
-	
+	statusFilter := types.TrackerStatusFromString(filterStr)
+	logger.Infof("statusAllHandler: filterStr='%s', statusFilter=%s (value=%d), local=%s", filterStr, statusFilter.String(), statusFilter, local)
+
 	// FIXME: This is a bit lazy, as "invalidxx,pinned" would result in a
 	// valid "pinned" filter.
-	if filter == types.TrackerStatusUndefined && filterStr != "" {
+	if statusFilter == types.TrackerStatusUndefined && filterStr != "" {
 		logger.Warnf("statusAllHandler: Invalid filter value: '%s'", filterStr)
 		api.SendResponse(w, http.StatusBadRequest, errors.New("invalid filter value"), nil)
 		return
 	}
 
+	// Parse metadata filter (format: "key1:value1,key2:value2" or "key:[min,max]")
+	metadataStr := queryValues.Get("metadata")
+	if metadataStr == "" {
+		// Fallback: case-insensitive or raw query (some proxies/routers alter Query())
+		for k, v := range queryValues {
+			if strings.EqualFold(k, "metadata") && len(v) > 0 {
+				metadataStr = v[0]
+				break
+			}
+		}
+	}
+	if metadataStr == "" && strings.Contains(r.URL.RawQuery, "metadata=") {
+		// Fallback: parse from raw query if Query() lost it
+		raw, _ := url.ParseQuery(r.URL.RawQuery)
+		metadataStr = raw.Get("metadata")
+	}
+	logger.Infof("statusAllHandler: metadataStr='%s'", metadataStr)
+
+	// Use raw string so filter works after RPC (map may not deserialize over the wire)
+	filter := types.NewStatusFilterWithMetadataStr(statusFilter, metadataStr)
+
+	// Parse metadata filter once for API-side filtering (used in closure; re-parsing is safe if metadataStr is set)
+	metadataFilter := types.MetadataFilterFromString(metadataStr)
+	hasMetadataFilter := len(metadataFilter) > 0
+	logger.Infof("statusAllHandler: hasMetadataFilter=%v, metadataFilter=%+v", hasMetadataFilter, metadataFilter)
+
 	var iter common.StreamIterator
-	in := make(chan types.TrackerStatus, 1)
+	in := make(chan types.StatusFilter, 1)
 	in <- filter
 	close(in)
 	errCh := make(chan error, 1)
-	
-	logger.Debugf("statusAllHandler: Sending filter %s to RPC", filter.String())
+
+	logger.Debugf("statusAllHandler: Sending filter (status=%s, metadata=%v) to RPC", filter.Status.String(), filter.Metadata)
 
 	if local == "true" {
 		out := make(chan types.PinInfo, common.StreamChannelSize)
 		count := 0
 		iter = func() (interface{}, bool, error) {
-			select {
-			case <-ctx.Done():
-				return nil, false, ctx.Err()
-			case p, ok := <-out:
-				if !ok {
-					logger.Infof("statusAllHandler: Finished streaming %d items (local)", count)
-					return nil, false, nil
+			for {
+				select {
+				case <-ctx.Done():
+					return nil, false, ctx.Err()
+				case p, ok := <-out:
+					if !ok {
+						logger.Infof("statusAllHandler: Finished streaming %d items (local)", count)
+						return nil, false, nil
+					}
+					// Normalize metadata to ensure JSON serialization works
+					if p.Metadata != nil {
+						p.Metadata = normalizeMetadata(p.Metadata)
+					}
+					gpi := p.ToGlobal()
+					// Also normalize in GlobalPinInfo to be safe
+					if gpi.Metadata != nil {
+						gpi.Metadata = normalizeMetadata(gpi.Metadata)
+					}
+					// Apply metadata filter on API side using pre-parsed filter
+					if hasMetadataFilter {
+						sf := types.StatusFilter{Metadata: metadataFilter}
+						if !sf.MatchMetadata(gpi.Metadata) {
+							continue
+						}
+					}
+					count++
+					if count%10 == 0 || count <= 5 {
+						logger.Debugf("statusAllHandler: Streamed %d items (local)", count)
+					}
+					return gpi, true, nil
 				}
-				// Normalize metadata to ensure JSON serialization works
-				if p.Metadata != nil {
-					p.Metadata = normalizeMetadata(p.Metadata)
-				}
-				gpi := p.ToGlobal()
-				// Also normalize in GlobalPinInfo to be safe
-				if gpi.Metadata != nil {
-					gpi.Metadata = normalizeMetadata(gpi.Metadata)
-				}
-				count++
-				if count%10 == 0 || count <= 5 {
-					logger.Debugf("statusAllHandler: Streamed %d items (local)", count)
-				}
-				return gpi, true, nil
 			}
 		}
 
@@ -980,23 +1039,34 @@ func (api *API) statusAllHandler(w http.ResponseWriter, r *http.Request) {
 		out := make(chan types.GlobalPinInfo, common.StreamChannelSize)
 		count := 0
 		iter = func() (interface{}, bool, error) {
-			select {
-			case <-ctx.Done():
-				return nil, false, ctx.Err()
-			case p, ok := <-out:
-				if ok {
+			for {
+				select {
+				case <-ctx.Done():
+					return nil, false, ctx.Err()
+				case p, ok := <-out:
+					if !ok {
+						logger.Infof("statusAllHandler: Finished streaming %d items", count)
+						return nil, false, nil
+					}
 					// Normalize metadata to ensure JSON serialization works
 					if p.Metadata != nil {
 						p.Metadata = normalizeMetadata(p.Metadata)
+					}
+					// Apply metadata filter on API side using pre-parsed filter
+					if hasMetadataFilter {
+						sf := types.StatusFilter{Metadata: metadataFilter}
+						matched := sf.MatchMetadata(p.Metadata)
+						logger.Debugf("statusAllHandler: CID=%s, matched=%v", p.Cid, matched)
+						if !matched {
+							continue
+						}
 					}
 					count++
 					if count%10 == 0 || count <= 5 {
 						logger.Debugf("statusAllHandler: Streamed %d items, latest CID=%s", count, p.Cid)
 					}
-				} else {
-					logger.Infof("statusAllHandler: Finished streaming %d items", count)
+					return p, true, nil
 				}
-				return p, ok, nil
 			}
 		}
 		go func() {
@@ -1017,6 +1087,7 @@ func (api *API) statusAllHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // request statuses for multiple CIDs in parallel.
+// Supports metadata filter: only pins matching metadata (e.g. observation.bloodOxygen:96) are returned.
 func (api *API) statusCidsHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -1026,6 +1097,10 @@ func (api *API) statusCidsHandler(w http.ResponseWriter, r *http.Request) {
 	var cids []types.Cid
 
 	for _, cidStr := range filterCidsStr {
+		cidStr = strings.TrimSpace(cidStr)
+		if cidStr == "" {
+			continue
+		}
 		c, err := types.DecodeCid(cidStr)
 		if err != nil {
 			api.SendResponse(w, http.StatusBadRequest, fmt.Errorf("error decoding Cid: %w", err), nil)
@@ -1034,7 +1109,29 @@ func (api *API) statusCidsHandler(w http.ResponseWriter, r *http.Request) {
 		cids = append(cids, c)
 	}
 
+	if len(cids) == 0 {
+		api.SendResponse(w, http.StatusBadRequest, errors.New("at least one cid is required"), nil)
+		return
+	}
+
 	local := queryValues.Get("local")
+
+	// Parse metadata filter (same format as statusAllHandler)
+	metadataStr := queryValues.Get("metadata")
+	if metadataStr == "" {
+		for k, v := range queryValues {
+			if strings.EqualFold(k, "metadata") && len(v) > 0 {
+				metadataStr = v[0]
+				break
+			}
+		}
+	}
+	if metadataStr == "" && strings.Contains(r.URL.RawQuery, "metadata=") {
+		raw, _ := url.ParseQuery(r.URL.RawQuery)
+		metadataStr = raw.Get("metadata")
+	}
+	metadataFilter := types.MetadataFilterFromString(metadataStr)
+	hasMetadataFilter := len(metadataFilter) > 0
 
 	gpiCh := make(chan types.GlobalPinInfo, len(cids))
 	errCh := make(chan error, len(cids))
@@ -1091,8 +1188,24 @@ func (api *API) statusCidsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	iter := func() (interface{}, bool, error) {
-		gpi, ok := <-gpiCh
-		return gpi, ok, nil
+		for {
+			gpi, ok := <-gpiCh
+			if !ok {
+				return nil, false, nil
+			}
+			// Normalize metadata so JSON encoding works (RPC may return map[interface{}]interface{})
+			if gpi.Metadata != nil {
+				gpi.Metadata = normalizeMetadata(gpi.Metadata)
+			}
+			// Apply metadata filter: skip pins that don't match
+			if hasMetadataFilter {
+				sf := types.StatusFilter{Metadata: metadataFilter}
+				if !sf.MatchMetadata(gpi.Metadata) {
+					continue
+				}
+			}
+			return gpi, true, nil
+		}
 	}
 
 	api.StreamResponse(w, iter, errCh)

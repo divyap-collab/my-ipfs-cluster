@@ -686,6 +686,23 @@ func TestAPIStatusAllEndpoint(t *testing.T) {
 		if errorResp.Code != http.StatusBadRequest {
 			t.Error("an invalid filter value should 400")
 		}
+
+		// Test metadata filter: mock returns Cid1 (no metadata), Cid2 (no metadata), Cid3 (metadata ccc=3c)
+		var respMeta []api.GlobalPinInfo
+		test.MakeStreamingGet(t, rest, url(rest)+"/pins?metadata=ccc:3c", &respMeta, false)
+		if len(respMeta) != 1 {
+			t.Errorf("metadata=ccc:3c should return 1 pin, got %d: %+v", len(respMeta), respMeta)
+		}
+		if len(respMeta) == 1 && !respMeta[0].Cid.Equals(clustertest.Cid3) {
+			t.Errorf("metadata filter should return Cid3, got %s", respMeta[0].Cid)
+		}
+
+		// Without metadata filter we get all 3
+		var respAll []api.GlobalPinInfo
+		test.MakeStreamingGet(t, rest, url(rest)+"/pins", &respAll, false)
+		if len(respAll) != 3 {
+			t.Errorf("no metadata filter should return 3 pins, got %d", len(respAll))
+		}
 	}
 
 	test.BothEndpoints(t, tf)

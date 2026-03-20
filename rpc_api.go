@@ -286,13 +286,13 @@ func (rpcapi *ClusterRPCAPI) Join(ctx context.Context, in api.Multiaddr, out *st
 }
 
 // StatusAll runs Cluster.StatusAll().
-func (rpcapi *ClusterRPCAPI) StatusAll(ctx context.Context, in <-chan api.TrackerStatus, out chan<- api.GlobalPinInfo) error {
+func (rpcapi *ClusterRPCAPI) StatusAll(ctx context.Context, in <-chan api.StatusFilter, out chan<- api.GlobalPinInfo) error {
 	filter := <-in
 	return rpcapi.c.StatusAll(ctx, filter, out)
 }
 
 // StatusAllLocal runs Cluster.StatusAllLocal().
-func (rpcapi *ClusterRPCAPI) StatusAllLocal(ctx context.Context, in <-chan api.TrackerStatus, out chan<- api.PinInfo) error {
+func (rpcapi *ClusterRPCAPI) StatusAllLocal(ctx context.Context, in <-chan api.StatusFilter, out chan<- api.PinInfo) error {
 	filter := <-in
 	return rpcapi.c.StatusAllLocal(ctx, filter, out)
 }
@@ -472,7 +472,7 @@ func (rpcapi *PinTrackerRPCAPI) Untrack(ctx context.Context, in api.Pin, out *st
 }
 
 // StatusAll runs PinTracker.StatusAll().
-func (rpcapi *PinTrackerRPCAPI) StatusAll(ctx context.Context, in <-chan api.TrackerStatus, out chan<- api.PinInfo) error {
+func (rpcapi *PinTrackerRPCAPI) StatusAll(ctx context.Context, in <-chan api.StatusFilter, out chan<- api.PinInfo) error {
 	ctx, span := trace.StartSpan(ctx, "rpc/tracker/StatusAll")
 	defer span.End()
 
