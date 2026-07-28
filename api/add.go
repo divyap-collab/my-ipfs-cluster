@@ -72,7 +72,7 @@ func DefaultAddParams() AddParams {
 			Name:                 "",
 			Mode:                 PinModeRecursive,
 			ShardSize:            DefaultShardSize,
-			Metadata:             make(map[string]string),
+			Metadata:             make(map[string]any),
 			Origins:              nil,
 		},
 		IPFSAddParams: IPFSAddParams{

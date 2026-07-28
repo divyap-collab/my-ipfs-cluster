@@ -238,7 +238,7 @@ func TestPinTracker_StatusAll(t *testing.T) {
 			time.Sleep(200 * time.Millisecond)
 			infos := make(chan api.PinInfo)
 			go func() {
-				err := tt.args.tracker.StatusAll(context.Background(), api.TrackerStatusUndefined, infos)
+				err := tt.args.tracker.StatusAll(context.Background(), api.NewStatusFilter(api.TrackerStatusUndefined), infos)
 				if err != nil {
 					t.Error()
 				}

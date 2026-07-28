@@ -184,6 +184,268 @@ func TrackerStatusAll() []TrackerStatus {
 	return list
 }
 
+// MetadataFilterValue represents a single metadata filter: either an exact match or an inclusive range [min, max].
+// For range, use Min and Max; for exact match, use Exact. Type-agnostic: numbers compare numerically when possible, else lexicographically.
+type MetadataFilterValue struct {
+	Exact string // exact match (non-empty)
+	Min   string // range min (use with Max for inclusive range)
+	Max   string // range max
+}
+
+// IsRange returns true if this filter is a range (min/max) rather than exact.
+func (v MetadataFilterValue) IsRange() bool {
+	return v.Min != "" || v.Max != ""
+}
+
+// StatusFilter combines TrackerStatus filtering with metadata filtering.
+// It is used to filter pins in StatusAll operations.
+type StatusFilter struct {
+	// Status is the TrackerStatus filter. TrackerStatusUndefined means all.
+	Status TrackerStatus
+	// Metadata is a map of key -> filter value (exact or range). An empty or nil map means no metadata filtering.
+	Metadata map[string]MetadataFilterValue
+	// MetadataFilterStr is the raw metadata query string (e.g. "patient.id:P-hospital-1"). Used when Metadata
+	// is empty after RPC deserialization so the filter can be parsed on the receiving side.
+	MetadataFilterStr string
+}
+
+// NewStatusFilter creates a new StatusFilter with the given status and no metadata filter.
+func NewStatusFilter(status TrackerStatus) StatusFilter {
+	return StatusFilter{
+		Status:   status,
+		Metadata: nil,
+	}
+}
+
+// NewStatusFilterWithMetadata creates a new StatusFilter with both status and metadata filters.
+func NewStatusFilterWithMetadata(status TrackerStatus, metadata map[string]MetadataFilterValue) StatusFilter {
+	return StatusFilter{
+		Status:   status,
+		Metadata: metadata,
+	}
+}
+
+// NewStatusFilterWithMetadataStr creates a StatusFilter with status and raw metadata query string.
+// Use this when passing the filter over RPC so the receiving side can parse the string if Metadata doesn't deserialize.
+func NewStatusFilterWithMetadataStr(status TrackerStatus, metadataStr string) StatusFilter {
+	parsed := MetadataFilterFromString(metadataStr)
+	return StatusFilter{
+		Status:            status,
+		Metadata:          parsed,
+		MetadataFilterStr: metadataStr,
+	}
+}
+
+// MatchStatus returns true if the given TrackerStatus matches the filter's status.
+func (sf StatusFilter) MatchStatus(st TrackerStatus) bool {
+	return sf.Status.Match(st)
+}
+
+// getNestedMetadataValue traverses nested maps using dot-separated path (e.g. "observation.bloodGlucose").
+// Returns (value, true) if found, (nil, false) otherwise.
+// Supports both map[string]any and map[interface{}]interface{} for nested maps (e.g. from RPC/state).
+func getNestedMetadataValue(metadata map[string]any, path string) (any, bool) {
+	if metadata == nil || path == "" {
+		return nil, false
+	}
+	parts := strings.Split(path, ".")
+	current := any(metadata)
+	for _, part := range parts {
+		val, ok := getMapValue(current, part)
+		if !ok {
+			return nil, false
+		}
+		current = val
+	}
+	return current, true
+}
+
+// getMapValue returns m[key] supporting both map[string]any and map[interface{}]interface{}.
+func getMapValue(m any, key string) (any, bool) {
+	if m == nil {
+		return nil, false
+	}
+	switch v := m.(type) {
+	case map[string]any:
+		val, ok := v[key]
+		return val, ok
+	case map[interface{}]interface{}:
+		val, ok := v[key]
+		return val, ok
+	default:
+		return nil, false
+	}
+}
+
+// valueInRange returns true if actual (as string) is within [min, max] inclusive.
+// Tries numeric comparison first (float64) for numbers; falls back to lexicographic string comparison.
+func valueInRange(actualStr, minStr, maxStr string) bool {
+	actualF, errA := strconv.ParseFloat(actualStr, 64)
+	minF, errMin := strconv.ParseFloat(minStr, 64)
+	maxF, errMax := strconv.ParseFloat(maxStr, 64)
+	if errA == nil && errMin == nil && errMax == nil {
+		return actualF >= minF && actualF <= maxF
+	}
+	// Fallback: string comparison (works for ISO dates, zero-padded numbers, etc.)
+	return actualStr >= minStr && actualStr <= maxStr
+}
+
+// valueExactMatch returns true if actual value matches the exact filter (e.g. 90 matches "90", 90.0, "90.0").
+func valueExactMatch(actualStr, exactStr string) bool {
+	if actualStr == exactStr {
+		return true
+	}
+	// Numeric comparison so 90 (number) and "90" and 90.0 all match
+	actualF, errA := strconv.ParseFloat(actualStr, 64)
+	exactF, errE := strconv.ParseFloat(exactStr, 64)
+	if errA == nil && errE == nil {
+		return actualF == exactF
+	}
+	return false
+}
+
+// effectiveMetadata returns the metadata filter map, parsing MetadataFilterStr if Metadata is empty.
+// This ensures the filter works after RPC when map[string]MetadataFilterValue may not deserialize.
+func (sf StatusFilter) effectiveMetadata() map[string]MetadataFilterValue {
+	if len(sf.Metadata) > 0 {
+		return sf.Metadata
+	}
+	if sf.MetadataFilterStr != "" {
+		return MetadataFilterFromString(sf.MetadataFilterStr)
+	}
+	return nil
+}
+
+// MatchMetadata returns true if the given metadata matches all key-value pairs
+// in the filter. If the filter has no metadata constraints, it always returns true.
+// Values in metadata can be of any type; they are compared as strings.
+// Nested object paths are supported via dot notation (e.g. "observation.bloodGlucose").
+// Range filters use inclusive [min,max]; comparison is numeric when possible, else lexicographic.
+func (sf StatusFilter) MatchMetadata(metadata map[string]any) bool {
+	meta := sf.effectiveMetadata()
+	if len(meta) == 0 {
+		return true
+	}
+	if metadata == nil {
+		return false
+	}
+	for k, fv := range meta {
+		var val any
+		var ok bool
+		if strings.Contains(k, ".") {
+			val, ok = getNestedMetadataValue(metadata, k)
+		} else {
+			val, ok = metadata[k]
+		}
+		if !ok {
+			return false
+		}
+		valStr := fmt.Sprintf("%v", val)
+		if fv.IsRange() {
+			if !valueInRange(valStr, fv.Min, fv.Max) {
+				return false
+			}
+		} else {
+			if !valueExactMatch(valStr, fv.Exact) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Match returns true if both status and metadata match.
+func (sf StatusFilter) Match(st TrackerStatus, metadata map[string]any) bool {
+	return sf.MatchStatus(st) && sf.MatchMetadata(metadata)
+}
+
+// HasMetadataFilter returns true if the filter has metadata constraints.
+func (sf StatusFilter) HasMetadataFilter() bool {
+	return len(sf.Metadata) > 0 || sf.MetadataFilterStr != ""
+}
+
+// parseRangeValue parses value as "[min,max]" or "[min max]" (inclusive range) or exact.
+// Returns MetadataFilterValue with either Exact set or Min/Max set.
+// Accepts comma or whitespace as separator inside brackets.
+func parseRangeValue(value string) MetadataFilterValue {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 && value[0] == '[' && value[len(value)-1] == ']' {
+		inner := strings.TrimSpace(value[1 : len(value)-1])
+		var min, max string
+		if comma := strings.Index(inner, ","); comma >= 0 {
+			min = strings.TrimSpace(inner[:comma])
+			max = strings.TrimSpace(inner[comma+1:])
+		} else {
+			parts := strings.Fields(inner)
+			if len(parts) >= 2 {
+				min = parts[0]
+				max = parts[1]
+			}
+		}
+		if min != "" || max != "" {
+			return MetadataFilterValue{Min: min, Max: max}
+		}
+	}
+	return MetadataFilterValue{Exact: value}
+}
+
+// splitMetadataFilterPairs splits "key1:val1,key2:[a,b],key3:v3" into pairs without splitting inside [].
+func splitMetadataFilterPairs(str string) []string {
+	var pairs []string
+	var start int
+	depth := 0
+	for i := 0; i < len(str); i++ {
+		switch str[i] {
+		case '[':
+			depth++
+		case ']':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				pairs = append(pairs, strings.TrimSpace(str[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	if start < len(str) {
+		pairs = append(pairs, strings.TrimSpace(str[start:]))
+	}
+	return pairs
+}
+
+// MetadataFilterFromString parses a metadata filter string in the format
+// "key1:value1,key2:[min,max],..." into a map. Returns nil if the string is empty.
+// Keys and values are trimmed of whitespace.
+// Range: use "[min,max]" or "[min max]" for inclusive range (e.g. "observation.bloodGlucose:[85,100]").
+// Exact: use "key:value" for exact match.
+func MetadataFilterFromString(str string) map[string]MetadataFilterValue {
+	if str == "" {
+		return nil
+	}
+	result := make(map[string]MetadataFilterValue)
+	for _, pair := range splitMetadataFilterPairs(str) {
+		if pair == "" {
+			continue
+		}
+		idx := strings.Index(pair, ":")
+		if idx == -1 {
+			result[strings.TrimSpace(pair)] = MetadataFilterValue{Exact: ""}
+			continue
+		}
+		key := strings.TrimSpace(pair[:idx])
+		value := strings.TrimSpace(pair[idx+1:])
+		if key != "" {
+			result[key] = parseRangeValue(value)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 // IPFSPinStatus values
 // FIXME include maxdepth
 const (
@@ -347,12 +609,12 @@ type IPFSPinInfo struct {
 // GlobalPinInfo contains cluster-wide status information about a tracked Cid,
 // indexed by cluster peer.
 type GlobalPinInfo struct {
-	Cid         Cid               `json:"cid" codec:"c"`
-	Name        string            `json:"name" codec:"n"`
-	Allocations []peer.ID         `json:"allocations" codec:"a,omitempty"`
-	Origins     []Multiaddr       `json:"origins" codec:"g,omitempty"`
-	Created     time.Time         `json:"created" codec:"t,omitempty"`
-	Metadata    map[string]string `json:"metadata" codec:"m,omitempty"`
+	Cid         Cid            `json:"cid" codec:"c"`
+	Name        string         `json:"name" codec:"n"`
+	Allocations []peer.ID      `json:"allocations" codec:"a,omitempty"`
+	Origins     []Multiaddr    `json:"origins" codec:"g,omitempty"`
+	Created     time.Time      `json:"created" codec:"t,omitempty"`
+	Metadata    map[string]any `json:"metadata" codec:"m,omitempty"`
 
 	// https://github.com/golang/go/issues/28827
 	// Peer IDs are of string Kind(). We can't use peer IDs here
@@ -433,13 +695,13 @@ func (pis PinInfoShort) String() string {
 // PinInfo holds information about local pins. This is used by the Pin
 // Trackers.
 type PinInfo struct {
-	Cid         Cid               `json:"cid" codec:"c"`
-	Name        string            `json:"name" codec:"m,omitempty"`
-	Peer        peer.ID           `json:"peer" codec:"p,omitempty"`
-	Allocations []peer.ID         `json:"allocations" codec:"o,omitempty"`
-	Origins     []Multiaddr       `json:"origins" codec:"g,omitempty"`
-	Created     time.Time         `json:"created" codec:"t,omitempty"`
-	Metadata    map[string]string `json:"metadata" codec:"md,omitempty"`
+	Cid         Cid            `json:"cid" codec:"c"`
+	Name        string         `json:"name" codec:"m,omitempty"`
+	Peer        peer.ID        `json:"peer" codec:"p,omitempty"`
+	Allocations []peer.ID      `json:"allocations" codec:"o,omitempty"`
+	Origins     []Multiaddr    `json:"origins" codec:"g,omitempty"`
+	Created     time.Time      `json:"created" codec:"t,omitempty"`
+	Metadata    map[string]any `json:"metadata" codec:"md,omitempty"`
 
 	PinInfoShort
 }
@@ -753,16 +1015,35 @@ func (pm PinMode) ToPinDepth() PinDepth {
 
 // PinOptions wraps user-defined options for Pins
 type PinOptions struct {
-	ReplicationFactorMin int               `json:"replication_factor_min" codec:"rn,omitempty"`
-	ReplicationFactorMax int               `json:"replication_factor_max" codec:"rx,omitempty"`
-	Name                 string            `json:"name" codec:"n,omitempty"`
-	Mode                 PinMode           `json:"mode" codec:"o,omitempty"`
-	ShardSize            uint64            `json:"shard_size" codec:"s,omitempty"`
-	UserAllocations      []peer.ID         `json:"user_allocations" codec:"ua,omitempty"`
-	ExpireAt             time.Time         `json:"expire_at" codec:"e,omitempty"`
-	Metadata             map[string]string `json:"metadata" codec:"m,omitempty"`
-	PinUpdate            Cid               `json:"pin_update,omitempty" codec:"pu,omitempty"`
-	Origins              []Multiaddr       `json:"origins" codec:"g,omitempty"`
+	ReplicationFactorMin int            `json:"replication_factor_min" codec:"rn,omitempty"`
+	ReplicationFactorMax int            `json:"replication_factor_max" codec:"rx,omitempty"`
+	Name                 string         `json:"name" codec:"n,omitempty"`
+	Mode                 PinMode        `json:"mode" codec:"o,omitempty"`
+	ShardSize            uint64         `json:"shard_size" codec:"s,omitempty"`
+	UserAllocations      []peer.ID      `json:"user_allocations" codec:"ua,omitempty"`
+	ExpireAt             time.Time      `json:"expire_at" codec:"e,omitempty"`
+	Metadata             map[string]any `json:"metadata" codec:"m,omitempty"`
+	PinUpdate            Cid            `json:"pin_update,omitempty" codec:"pu,omitempty"`
+	Origins              []Multiaddr    `json:"origins" codec:"g,omitempty"`
+}
+
+// metadataValueEqual compares two metadata values for equality.
+// It handles different types by comparing their JSON representations.
+func metadataValueEqual(v1, v2 any) bool {
+	if v1 == nil && v2 == nil {
+		return true
+	}
+	if v1 == nil || v2 == nil {
+		return false
+	}
+	// Use JSON comparison for complex types
+	json1, err1 := json.Marshal(v1)
+	json2, err2 := json.Marshal(v2)
+	if err1 != nil || err2 != nil {
+		// If marshaling fails, do direct comparison
+		return v1 == v2
+	}
+	return string(json1) == string(json2)
 }
 
 // Equals returns true if two PinOption objects are equivalent. po and po2 may
@@ -808,8 +1089,14 @@ func (po PinOptions) Equals(po2 PinOptions) bool {
 	}
 
 	for k, v := range po.Metadata {
-		v2 := po2.Metadata[k]
-		if k != "" && v != v2 {
+		v2, exists := po2.Metadata[k]
+		if k != "" && (!exists || !metadataValueEqual(v, v2)) {
+			return false
+		}
+	}
+	// Check for keys in po2 that don't exist in po
+	for k := range po2.Metadata {
+		if _, exists := po.Metadata[k]; !exists {
 			return false
 		}
 	}
@@ -857,7 +1144,18 @@ func (po PinOptions) ToQuery() (string, error) {
 		if k == "" {
 			continue
 		}
-		q.Set(fmt.Sprintf("%s%s", pinOptionsMetaPrefix, k), v)
+		// Serialize value as JSON if it's not already a string
+		var valueStr string
+		if strVal, ok := v.(string); ok {
+			valueStr = strVal
+		} else {
+			jsonBytes, err := json.Marshal(v)
+			if err != nil {
+				return "", fmt.Errorf("error marshaling metadata value for key %s: %w", k, err)
+			}
+			valueStr = string(jsonBytes)
+		}
+		q.Set(fmt.Sprintf("%s%s", pinOptionsMetaPrefix, k), valueStr)
 	}
 	if po.PinUpdate.Defined() {
 		q.Set("pin-update", po.PinUpdate.String())
@@ -926,7 +1224,7 @@ func (po *PinOptions) FromQuery(q url.Values) error {
 		po.ExpireAt = time.Now().Add(d)
 	}
 
-	po.Metadata = make(map[string]string)
+	po.Metadata = make(map[string]any)
 	for k := range q {
 		if !strings.HasPrefix(k, pinOptionsMetaPrefix) {
 			continue
@@ -935,7 +1233,14 @@ func (po *PinOptions) FromQuery(q url.Values) error {
 		if metaKey == "" {
 			continue
 		}
-		po.Metadata[metaKey] = q.Get(k)
+		valueStr := q.Get(k)
+		// Try to parse as JSON first, if that fails, treat as string
+		var value any
+		if err := json.Unmarshal([]byte(valueStr), &value); err != nil {
+			// Not valid JSON, treat as plain string
+			value = valueStr
+		}
+		po.Metadata[metaKey] = value
 	}
 
 	updateStr := q.Get("pin-update")
@@ -1119,9 +1424,20 @@ func (pin Pin) ProtoMarshal() ([]byte, error) {
 	sort.Strings(metaKeys)
 
 	for _, k := range metaKeys {
+		// Serialize value as JSON string if it's not already a string
+		var valueStr string
+		if strVal, ok := pin.Metadata[k].(string); ok {
+			valueStr = strVal
+		} else {
+			jsonBytes, err := json.Marshal(pin.Metadata[k])
+			if err != nil {
+				return nil, fmt.Errorf("error marshaling metadata value for key %s: %w", k, err)
+			}
+			valueStr = string(jsonBytes)
+		}
 		metadata := &pb.Metadata{
 			Key:   k,
-			Value: pin.Metadata[k],
+			Value: valueStr,
 		}
 		sortedMetadata = append(sortedMetadata, metadata)
 	}
@@ -1210,13 +1526,28 @@ func (pin *Pin) ProtoUnmarshal(data []byte) error {
 
 	// Use whatever metadata is available.
 	//lint:ignore SA1019 we keed to keep backwards compat
-	pin.Metadata = opts.GetMetadata()
+	legacyMetadata := opts.GetMetadata()
 	sortedMetadata := opts.GetSortedMetadata()
 	if len(sortedMetadata) > 0 && pin.Metadata == nil {
-		pin.Metadata = make(map[string]string, len(sortedMetadata))
+		pin.Metadata = make(map[string]any, len(sortedMetadata))
+	}
+	// Convert legacy map[string]string to map[string]any
+	if legacyMetadata != nil && len(legacyMetadata) > 0 {
+		if pin.Metadata == nil {
+			pin.Metadata = make(map[string]any, len(legacyMetadata))
+		}
+		for k, v := range legacyMetadata {
+			pin.Metadata[k] = v
+		}
 	}
 	for _, md := range opts.GetSortedMetadata() {
-		pin.Metadata[md.Key] = md.Value
+		// Try to parse value as JSON, if that fails, treat as string
+		var value any
+		if err := json.Unmarshal([]byte(md.Value), &value); err != nil {
+			// Not valid JSON, treat as plain string
+			value = md.Value
+		}
+		pin.Metadata[md.Key] = value
 	}
 
 	pinUpdate, err := CastCid(opts.GetPinUpdate())

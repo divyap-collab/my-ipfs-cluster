@@ -244,7 +244,7 @@ func (mock *mockCluster) ConnectGraph(ctx context.Context, in struct{}, out *api
 	return nil
 }
 
-func (mock *mockCluster) StatusAll(ctx context.Context, in <-chan api.TrackerStatus, out chan<- api.GlobalPinInfo) error {
+func (mock *mockCluster) StatusAll(ctx context.Context, in <-chan api.StatusFilter, out chan<- api.GlobalPinInfo) error {
 	defer close(out)
 	filter := <-in
 
@@ -273,7 +273,7 @@ func (mock *mockCluster) StatusAll(ctx context.Context, in <-chan api.TrackerSta
 		{
 			Cid:  Cid3,
 			Name: "ccc",
-			Metadata: map[string]string{
+			Metadata: map[string]any{
 				"ccc": "3c",
 			},
 			PeerMap: map[string]api.PinInfoShort{
@@ -289,7 +289,7 @@ func (mock *mockCluster) StatusAll(ctx context.Context, in <-chan api.TrackerSta
 	// a single peer, we will not have an entry for the cid at all.
 	for _, gpi := range gPinInfos {
 		for id, pi := range gpi.PeerMap {
-			if !filter.Match(pi.Status) {
+			if !filter.Match(pi.Status, gpi.Metadata) {
 				delete(gpi.PeerMap, id)
 			}
 		}
@@ -303,7 +303,7 @@ func (mock *mockCluster) StatusAll(ctx context.Context, in <-chan api.TrackerSta
 	return nil
 }
 
-func (mock *mockCluster) StatusAllLocal(ctx context.Context, in <-chan api.TrackerStatus, out chan<- api.PinInfo) error {
+func (mock *mockCluster) StatusAllLocal(ctx context.Context, in <-chan api.StatusFilter, out chan<- api.PinInfo) error {
 	return (&mockPinTracker{}).StatusAll(ctx, in, out)
 }
 
@@ -318,7 +318,7 @@ func (mock *mockCluster) Status(ctx context.Context, in api.Cid, out *api.Global
 		Name:        "test",
 		Allocations: nil,
 		Origins:     nil,
-		Metadata: map[string]string{
+		Metadata: map[string]any{
 			"meta": "data",
 		},
 
@@ -457,7 +457,7 @@ func (mock *mockPinTracker) Untrack(ctx context.Context, in api.Pin, out *struct
 	return nil
 }
 
-func (mock *mockPinTracker) StatusAll(ctx context.Context, in <-chan api.TrackerStatus, out chan<- api.PinInfo) error {
+func (mock *mockPinTracker) StatusAll(ctx context.Context, in <-chan api.StatusFilter, out chan<- api.PinInfo) error {
 	defer close(out)
 	filter := <-in
 
@@ -480,7 +480,7 @@ func (mock *mockPinTracker) StatusAll(ctx context.Context, in <-chan api.Tracker
 		},
 	}
 	for _, pi := range pinInfos {
-		if filter.Match(pi.Status) {
+		if filter.Match(pi.Status, pi.Metadata) {
 			out <- pi
 		}
 	}

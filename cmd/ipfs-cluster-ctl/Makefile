@@ -1,7 +1,7 @@
 # go source files
 SRC := $(shell find ../.. -type f -name '*.go')
 GOPATH := $(shell go env GOPATH)
-GOFLAGS := "-trimpath"
+GOFLAGS := -trimpath -buildvcs=false
 
 all: ipfs-cluster-ctl
 

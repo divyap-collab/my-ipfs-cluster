@@ -1256,11 +1256,11 @@ func (c *Cluster) StateSync(ctx context.Context) error {
 // the out channel. This is done by broacasting a StatusAll to all peers.  If
 // an error happens, it is returned. This method blocks until it finishes. The
 // operation can be aborted by canceling the context.
-func (c *Cluster) StatusAll(ctx context.Context, filter api.TrackerStatus, out chan<- api.GlobalPinInfo) error {
+func (c *Cluster) StatusAll(ctx context.Context, filter api.StatusFilter, out chan<- api.GlobalPinInfo) error {
 	ctx, span := trace.StartSpan(ctx, "cluster/StatusAll")
 	defer span.End()
 
-	in := make(chan api.TrackerStatus, 1)
+	in := make(chan api.StatusFilter, 1)
 	in <- filter
 	close(in)
 	return c.globalPinInfoStream(ctx, "PinTracker", "StatusAll", in, out)
@@ -1268,7 +1268,7 @@ func (c *Cluster) StatusAll(ctx context.Context, filter api.TrackerStatus, out c
 
 // StatusAllLocal returns the PinInfo for all the tracked Cids in this peer on
 // the out channel. It blocks until finished.
-func (c *Cluster) StatusAllLocal(ctx context.Context, filter api.TrackerStatus, out chan<- api.PinInfo) error {
+func (c *Cluster) StatusAllLocal(ctx context.Context, filter api.StatusFilter, out chan<- api.PinInfo) error {
 	ctx, span := trace.StartSpan(ctx, "cluster/StatusAllLocal")
 	defer span.End()
 

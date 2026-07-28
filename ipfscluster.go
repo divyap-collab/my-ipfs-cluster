@@ -126,8 +126,8 @@ type PinTracker interface {
 	// may perform an IPFS unpin operation.
 	Untrack(context.Context, api.Cid) error
 	// StatusAll returns the list of pins with their local status. Takes a
-	// filter to specify which statuses to report.
-	StatusAll(context.Context, api.TrackerStatus, chan<- api.PinInfo) error
+	// filter to specify which statuses to report and optionally filter by metadata.
+	StatusAll(context.Context, api.StatusFilter, chan<- api.PinInfo) error
 	// Status returns the local status of a given Cid.
 	Status(context.Context, api.Cid) api.PinInfo
 	// RecoverAll calls Recover() for all pins tracked.

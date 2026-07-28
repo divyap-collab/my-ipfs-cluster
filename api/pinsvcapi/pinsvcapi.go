@@ -71,11 +71,54 @@ func svcStatusToTrackerStatus(st pinsvc.Status) types.TrackerStatus {
 	return tst
 }
 
+// convertMetadataToStringMap converts map[string]any to map[string]string
+// by serializing non-string values as JSON
+func convertMetadataToStringMap(meta map[string]any) map[string]string {
+	if meta == nil {
+		return nil
+	}
+	result := make(map[string]string, len(meta))
+	for k, v := range meta {
+		if strVal, ok := v.(string); ok {
+			result[k] = strVal
+		} else {
+			// Serialize non-string values as JSON
+			jsonBytes, err := json.Marshal(v)
+			if err != nil {
+				// If marshaling fails, convert to string representation
+				result[k] = fmt.Sprintf("%v", v)
+			} else {
+				result[k] = string(jsonBytes)
+			}
+		}
+	}
+	return result
+}
+
+// convertMetadataToAnyMap converts map[string]string to map[string]any
+// by attempting to parse JSON values
+func convertMetadataToAnyMap(meta map[string]string) map[string]any {
+	if meta == nil {
+		return nil
+	}
+	result := make(map[string]any, len(meta))
+	for k, v := range meta {
+		// Try to parse as JSON first, if that fails, treat as string
+		var value any
+		if err := json.Unmarshal([]byte(v), &value); err != nil {
+			// Not valid JSON, treat as plain string
+			value = v
+		}
+		result[k] = value
+	}
+	return result
+}
+
 func svcPinToClusterPin(p pinsvc.Pin) (types.Pin, error) {
 	opts := types.PinOptions{
 		Name:     string(p.Name),
 		Origins:  p.Origins,
-		Metadata: p.Meta,
+		Metadata: convertMetadataToAnyMap(p.Meta),
 		Mode:     types.PinModeRecursive,
 	}
 	return types.PinWithOpts(p.Cid, opts), nil
@@ -101,7 +144,7 @@ func globalPinInfoToSvcPinStatus(
 		Cid:     gpi.Cid,
 		Name:    pinsvc.PinName(gpi.Name),
 		Origins: gpi.Origins,
-		Meta:    gpi.Metadata,
+		Meta:    convertMetadataToStringMap(gpi.Metadata),
 	}
 
 	status.Info = apiInfo
@@ -121,6 +164,10 @@ type API struct {
 
 	rpcClient *rpc.Client
 	config    *Config
+
+	// In-memory pin store
+    pinStore map[string]*types.Pin
+    lock     sync.RWMutex
 }
 
 // NewAPI creates a new REST API component.
@@ -439,7 +486,7 @@ func (api *API) pinToSvcPinStatus(ctx context.Context, rID string, pin types.Pin
 			Cid:     pin.Cid,
 			Name:    pinsvc.PinName(pin.Name),
 			Origins: pin.Origins,
-			Meta:    pin.Metadata,
+			Meta:    convertMetadataToStringMap(pin.Metadata),
 		},
 		Info: apiInfo,
 	}

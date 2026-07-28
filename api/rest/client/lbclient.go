@@ -343,6 +343,36 @@ func (lc *loadBalancingClient) StatusAll(ctx context.Context, filter api.Tracker
 	return err
 }
 
+// StatusAllWithMetadata gathers Status() for all tracked items, with optional metadata filtering.
+// The metadata parameter is a map of key-value pairs that must all match for a pin to be included.
+// If local is true, the operation is limited to the current peer. Otherwise, it happens
+// on every cluster peer.
+func (lc *loadBalancingClient) StatusAllWithMetadata(ctx context.Context, filter api.TrackerStatus, metadata map[string]string, local bool, out chan<- api.GlobalPinInfo) error {
+	call := func(c Client) error {
+		done := make(chan struct{})
+		cout := make(chan api.GlobalPinInfo, cap(out))
+		go func() {
+			for o := range cout {
+				out <- o
+			}
+			done <- struct{}{}
+		}()
+
+		// this blocks until done
+		err := c.StatusAllWithMetadata(ctx, filter, metadata, local, cout)
+		// wait for cout to be closed
+		select {
+		case <-ctx.Done():
+		case <-done:
+		}
+		return err
+	}
+
+	err := lc.retry(0, call)
+	close(out)
+	return err
+}
+
 // Recover retriggers pin or unpin ipfs operations for a Cid in error state.
 // If local is true, the operation is limited to the current peer, otherwise
 // it happens on every cluster peer.

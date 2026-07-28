@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -323,18 +324,20 @@ func (spt *Tracker) Untrack(ctx context.Context, c api.Cid) error {
 }
 
 // StatusAll returns information for all Cids pinned to the local IPFS node.
-func (spt *Tracker) StatusAll(ctx context.Context, filter api.TrackerStatus, out chan<- api.PinInfo) error {
+func (spt *Tracker) StatusAll(ctx context.Context, filter api.StatusFilter, out chan<- api.PinInfo) error {
 	ctx, span := trace.StartSpan(ctx, "tracker/stateless/StatusAll")
 	defer span.End()
 
+	logger.Infof("StatusAll called with filter: status=%s (value: %d), metadata=%v", filter.Status.String(), filter.Status, filter.Metadata)
 	ipfsid := spt.getIPFSID(ctx)
 
 	// Any other states are just operation-tracker states, so we just give
-	// those and return.
-	if !filter.Match(
-		api.TrackerStatusPinned | api.TrackerStatusUnexpectedlyUnpinned |
-			api.TrackerStatusSharded | api.TrackerStatusRemote) {
-		return spt.optracker.GetAllChannel(ctx, filter, ipfsid, out)
+	// those and return. Only do this if there's no metadata filter (optracker doesn't have metadata).
+	if !filter.HasMetadataFilter() && !filter.Status.Match(
+		api.TrackerStatusPinned|api.TrackerStatusUnexpectedlyUnpinned|
+			api.TrackerStatusSharded|api.TrackerStatusRemote) {
+		logger.Infof("StatusAll: Filter doesn't match pinned states, using optracker only")
+		return spt.optracker.GetAllChannel(ctx, filter.Status, ipfsid, out)
 	}
 
 	defer close(out)
@@ -347,16 +350,23 @@ func (spt *Tracker) StatusAll(ctx context.Context, filter api.TrackerStatus, out
 	}
 
 	var ipfsRecursivePins map[api.Cid]api.IPFSPinStatus
-	// Only query IPFS if we want to status for pinned items
-	if filter.Match(api.TrackerStatusPinned | api.TrackerStatusUnexpectedlyUnpinned) {
+	// Query IPFS if we want to status for pinned items, or if no filter is provided
+	// (TrackerStatusUndefined means "all", so we need IPFS status to determine actual status)
+	shouldQueryIPFS := filter.Status == api.TrackerStatusUndefined || filter.Status.Match(api.TrackerStatusPinned|api.TrackerStatusUnexpectedlyUnpinned)
+	logger.Infof("StatusAll: shouldQueryIPFS=%v (filter.Status=%d, undefined=%v)", shouldQueryIPFS, filter.Status, filter.Status == api.TrackerStatusUndefined)
+	if shouldQueryIPFS {
 		ipfsRecursivePins = make(map[api.Cid]api.IPFSPinStatus)
+		logger.Infof("StatusAll: Querying IPFS pinset...")
 		// At some point we need a full map of what we have and what
 		// we don't. The IPFS pinset is the smallest thing we can keep
 		// on memory.
 		ipfsPinsCh, errCh := spt.ipfsPins(ctx)
+		pinCount := 0
 		for ipfsPinInfo := range ipfsPinsCh {
 			ipfsRecursivePins[ipfsPinInfo.Cid] = ipfsPinInfo.Type
+			pinCount++
 		}
+		logger.Infof("StatusAll: Found %d pins in IPFS pinset", pinCount)
 		// If there was an error listing recursive pins then abort.
 		err := <-errCh
 		if err != nil {
@@ -364,6 +374,8 @@ func (spt *Tracker) StatusAll(ctx context.Context, filter api.TrackerStatus, out
 			logger.Error(err)
 			return err
 		}
+	} else {
+		logger.Infof("StatusAll: Skipping IPFS pinset query")
 	}
 
 	// Prepare pinset streaming
@@ -388,20 +400,82 @@ func (spt *Tracker) StatusAll(ctx context.Context, filter api.TrackerStatus, out
 	}
 
 	// For every item in the state.
+	statePinCount := 0
+	sentCount := 0
+	skippedCount := 0
 	for p := range statePins {
+		statePinCount++
 		select {
 		case <-ctx.Done():
 		case <-spt.ctx.Done():
 		default:
 		}
 
-		// if there is an operation, issue that and move on
-		info, ok := spt.optracker.GetExists(ctx, p.Cid, ipfsid)
-		if ok && filter.Match(info.Status) {
-			if !trySend(info) {
-				return fmt.Errorf("error issuing PinInfo: %w", ctx.Err())
+		// Special logging for debugging newly added pins
+		isTestPin := p.Cid.String() == "QmbsDZoz48SPBNikK96a8bG753WJiFiAvp8SC1n6mKsN9h" ||
+			strings.Contains(p.Name, "test_metadata") ||
+			(p.Metadata != nil && p.Metadata["uploadedBy"] == "Divya")
+		if isTestPin {
+			logger.Infof("StatusAll: *** Processing TEST PIN CID=%s, Name=%s, Type=%d ***", p.Cid, p.Name, p.Type)
+		} else {
+			logger.Debugf("StatusAll: Processing pin CID=%s, Name=%s, Type=%d", p.Cid, p.Name, p.Type)
+		}
+
+		// Check if pin is in IPFS first (if we have the pinset)
+		var ipfsStatus api.IPFSPinStatus
+		var pinnedInIpfs bool
+		if ipfsRecursivePins != nil {
+			// Try direct lookup
+			ipfsStatus, pinnedInIpfs = ipfsRecursivePins[api.Cid(p.Cid)]
+
+			// If not found, try searching by string representation (CID format might differ)
+			if !pinnedInIpfs {
+				cidStr := p.Cid.String()
+				for cidKey, status := range ipfsRecursivePins {
+					if cidKey.String() == cidStr {
+						ipfsStatus = status
+						pinnedInIpfs = true
+						logger.Debugf("StatusAll: Pin %s found in IPFS pinset by string match (key was %s)", p.Cid, cidKey)
+						break
+					}
+				}
 			}
-			continue // next pin
+
+			if pinnedInIpfs {
+				logger.Debugf("StatusAll: Pin %s found in IPFS pinset with status %s", p.Cid, ipfsStatus.String())
+			} else {
+				logger.Debugf("StatusAll: Pin %s NOT found in IPFS pinset (searched %d pins)", p.Cid, len(ipfsRecursivePins))
+			}
+		} else {
+			logger.Debugf("StatusAll: ipfsRecursivePins is nil for pin %s", p.Cid)
+		}
+
+		// if there is an operation, check if we should use it
+		info, ok := spt.optracker.GetExists(ctx, p.Cid, ipfsid)
+		if ok {
+			logger.Debugf("StatusAll: Pin %s found in optracker with status %s", p.Cid, info.Status.String())
+			// If IPFS shows pinned, prefer IPFS status over operation status
+			// (operation might be stale if pin completed but wasn't cleaned yet)
+			if pinnedInIpfs {
+				logger.Debugf("StatusAll: Pin %s is in IPFS, using IPFS status instead of optracker status", p.Cid)
+				// Use IPFS status, fall through to build PinInfo with IPFS status
+			} else if filter.MatchStatus(info.Status) && filter.MatchMetadata(p.Metadata) {
+				// No IPFS status, and operation matches filter (both status and metadata), use operation status
+				// Note: we use p.Metadata from state since optracker info may not have metadata
+				info.Metadata = p.Metadata // Ensure metadata is included in the response
+				logger.Debugf("StatusAll: Pin %s using optracker status %s (matches filter)", p.Cid, info.Status.String())
+				if !trySend(info) {
+					return fmt.Errorf("error issuing PinInfo: %w", ctx.Err())
+				}
+				sentCount++
+				continue // next pin
+			} else {
+				logger.Debugf("StatusAll: Pin %s optracker status %s does NOT match filter, checking IPFS", p.Cid, info.Status.String())
+			}
+			// If operation exists but doesn't match filter, still check IPFS
+			// in case the operation is stale (e.g., completed but not cleaned yet)
+		} else {
+			logger.Debugf("StatusAll: Pin %s NOT found in optracker", p.Cid)
 		}
 
 		// Preliminary PinInfo for this Pin.
@@ -426,18 +500,19 @@ func (spt *Tracker) StatusAll(ctx context.Context, filter api.TrackerStatus, out
 			},
 		}
 
-		ipfsStatus, pinnedInIpfs := ipfsRecursivePins[api.Cid(p.Cid)]
-
 		switch {
 		case p.Type == api.MetaType:
 			info.Status = api.TrackerStatusSharded
+			logger.Debugf("StatusAll: Pin %s is MetaType, status=Sharded", p.Cid)
 		case p.IsRemotePin(spt.peerID):
 			info.Status = api.TrackerStatusRemote
+			logger.Debugf("StatusAll: Pin %s is RemotePin, status=Remote", p.Cid)
 		case pinnedInIpfs:
 			// No need to filter. pinnedInIpfs is false
 			// unless the filter is Pinned |
 			// UnexpectedlyUnpinned. We filter at the end.
 			info.Status = ipfsStatus.ToTrackerStatus()
+			logger.Debugf("StatusAll: Pin %s is pinned in IPFS, status=%s", p.Cid, info.Status.String())
 		default:
 			// Not on an operation
 			// Not a meta pin
@@ -448,15 +523,31 @@ func (spt *Tracker) StatusAll(ctx context.Context, filter api.TrackerStatus, out
 			// should be pinned on IPFS and it is not.
 			info.Status = api.TrackerStatusUnexpectedlyUnpinned
 			info.Error = errUnexpectedlyUnpinned.Error()
+			logger.Debugf("StatusAll: Pin %s is UnexpectedlyUnpinned", p.Cid)
 		}
-		if !filter.Match(info.Status) {
+
+		matchesStatus := filter.MatchStatus(info.Status)
+		matchesMetadata := filter.MatchMetadata(info.Metadata)
+		matchesFilter := matchesStatus && matchesMetadata
+		logger.Debugf("StatusAll: Pin %s final status=%s, matchesStatus=%v, matchesMetadata=%v (filter.Status=%s, filter.Metadata=%v)",
+			p.Cid, info.Status.String(), matchesStatus, matchesMetadata, filter.Status.String(), filter.Metadata)
+		if !matchesFilter {
+			if !matchesStatus {
+				logger.Debugf("StatusAll: Pin %s filtered out (status %s doesn't match filter %s)", p.Cid, info.Status.String(), filter.Status.String())
+			} else {
+				logger.Debugf("StatusAll: Pin %s filtered out (metadata doesn't match filter)", p.Cid)
+			}
+			skippedCount++
 			continue
 		}
 
+		logger.Debugf("StatusAll: Sending pin %s with status %s", p.Cid, info.Status.String())
 		if !trySend(info) {
 			return fmt.Errorf("error issuing PinInfo: %w", ctx.Err())
 		}
+		sentCount++
 	}
+	logger.Infof("StatusAll: Processed %d pins from state, sent %d, skipped %d", statePinCount, sentCount, skippedCount)
 	return nil
 }
 
@@ -565,7 +656,7 @@ func (spt *Tracker) RecoverAll(ctx context.Context, out chan<- api.PinInfo) erro
 
 	statusesCh := make(chan api.PinInfo, 1024)
 	go func() {
-		err := spt.StatusAll(ctx, api.TrackerStatusUndefined, statusesCh)
+		err := spt.StatusAll(ctx, api.NewStatusFilter(api.TrackerStatusUndefined), statusesCh)
 		if err != nil {
 			logger.Error(err)
 		}

@@ -87,6 +87,9 @@ type Client interface {
 	StatusCids(ctx context.Context, cids []api.Cid, local bool, out chan<- api.GlobalPinInfo) error
 	// StatusAll gathers Status() for all tracked items.
 	StatusAll(ctx context.Context, filter api.TrackerStatus, local bool, out chan<- api.GlobalPinInfo) error
+	// StatusAllWithMetadata gathers Status() for all tracked items, with optional metadata filtering.
+	// The metadata parameter is a map of key-value pairs that must all match for a pin to be included.
+	StatusAllWithMetadata(ctx context.Context, filter api.TrackerStatus, metadata map[string]string, local bool, out chan<- api.GlobalPinInfo) error
 
 	// Recover retriggers pin or unpin ipfs operations for a Cid in error
 	// state.  If local is true, the operation is limited to the current

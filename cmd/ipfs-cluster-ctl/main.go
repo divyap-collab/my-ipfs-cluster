@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1302,14 +1303,20 @@ func waitFor(
 	return client.WaitFor(ctx, globalClient, fp)
 }
 
-func parseMetadata(metadata []string) map[string]string {
-	metadataMap := make(map[string]string)
+func parseMetadata(metadata []string) map[string]any {
+	metadataMap := make(map[string]any)
 	for _, str := range metadata {
 		parts := strings.SplitN(str, "=", 2)
 		if len(parts) != 2 {
 			checkErr("parsing metadata", errors.New("metadata were not in the format key=value"))
 		}
-		metadataMap[parts[0]] = parts[1]
+		// Try to parse value as JSON, if that fails, treat as string
+		var value any
+		if err := json.Unmarshal([]byte(parts[1]), &value); err != nil {
+			// Not valid JSON, treat as plain string
+			value = parts[1]
+		}
+		metadataMap[parts[0]] = value
 	}
 
 	return metadataMap
