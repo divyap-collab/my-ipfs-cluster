@@ -501,7 +501,7 @@ func (ipfs *Connector) Pin(ctx context.Context, pin api.Pin) error {
 	totalPins := atomic.AddInt64(&ipfs.ipfsPinCount, 1)
 	stats.Record(ipfs.ctx, observations.PinsIpfsPins.M(totalPins))
 
-	logger.Info("IPFS Pin request succeeded: ", hash)
+	logger.Debug("IPFS Pin request succeeded: ", hash)
 	return nil
 }
 

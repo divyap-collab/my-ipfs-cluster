@@ -368,7 +368,7 @@ func (api *API) addHandler(w http.ResponseWriter, r *http.Request) {
 		for k, v := range metadata {
 			params.Metadata[k] = v
 		}
-		api.config.Logger.Infof("addHandler: extracted and merged metadata from form body: %+v", params.Metadata)
+		api.config.Logger.Debugf("addHandler: extracted and merged metadata from form body: %+v", params.Metadata)
 	} else {
 		api.config.Logger.Debugf("addHandler: no metadata found in form body, using query params metadata: %+v", params.Metadata)
 	}
@@ -392,7 +392,7 @@ func (api *API) addHandler(w http.ResponseWriter, r *http.Request) {
 		// Error is already sent as trailer by AddMultipartHTTPHandler
 		return
 	}
-	api.config.Logger.Infof("addHandler: successfully added content with root CID: %s, NoPin: %v", rootCid, params.NoPin)
+	api.config.Logger.Debugf("addHandler: successfully added content with root CID: %s, NoPin: %v", rootCid, params.NoPin)
 }
 
 // normalizeMetadata recursively converts map[interface{}]interface{} to map[string]any
@@ -763,7 +763,7 @@ func (api *API) unpinPathHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) updatePinMetadataHandler(w http.ResponseWriter, r *http.Request) {
-	api.config.Logger.Info("updatePinMetadataHandler: starting metadata update request")
+	api.config.Logger.Debug("updatePinMetadataHandler: starting metadata update request")
 
 	// 1️⃣ Get CID from URL
 	vars := mux.Vars(r)
@@ -809,7 +809,8 @@ func (api *API) updatePinMetadataHandler(w http.ResponseWriter, r *http.Request)
 		&pinObj,
 	)
 	if err != nil {
-		api.config.Logger.Errorf("updatePinMetadataHandler: failed to fetch pin: %v", err)
+		// Common during create→PATCH races / CRDT lag; callers retry. Avoid ERROR spam in journald.
+		api.config.Logger.Debugf("updatePinMetadataHandler: failed to fetch pin: %v", err)
 		api.SendResponse(w, http.StatusNotFound, fmt.Errorf("pin not found: %w", err), nil)
 		return
 	}
@@ -842,7 +843,7 @@ func (api *API) updatePinMetadataHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	// 6️⃣ Return updated pin
-	api.config.Logger.Infof("updatePinMetadataHandler: metadata update successful for CID: %s", c)
+	api.config.Logger.Debugf("updatePinMetadataHandler: metadata update successful for CID: %s", c)
 	api.SendResponse(w, http.StatusOK, nil, updatedPin)
 }
 
@@ -927,7 +928,7 @@ func (api *API) statusAllHandler(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// Debug: log raw URL so we can verify query string reaches the handler
-	logger.Infof("statusAllHandler: request URL RawQuery='%s'", r.URL.RawQuery)
+	logger.Debugf("statusAllHandler: request URL RawQuery='%s'", r.URL.RawQuery)
 
 	queryValues := r.URL.Query()
 	if queryValues.Get("cids") != "" {
@@ -940,7 +941,7 @@ func (api *API) statusAllHandler(w http.ResponseWriter, r *http.Request) {
 	// Parse status filter
 	filterStr := queryValues.Get("filter")
 	statusFilter := types.TrackerStatusFromString(filterStr)
-	logger.Infof("statusAllHandler: filterStr='%s', statusFilter=%s (value=%d), local=%s", filterStr, statusFilter.String(), statusFilter, local)
+	logger.Debugf("statusAllHandler: filterStr='%s', statusFilter=%s (value=%d), local=%s", filterStr, statusFilter.String(), statusFilter, local)
 
 	// FIXME: This is a bit lazy, as "invalidxx,pinned" would result in a
 	// valid "pinned" filter.
@@ -966,7 +967,7 @@ func (api *API) statusAllHandler(w http.ResponseWriter, r *http.Request) {
 		raw, _ := url.ParseQuery(r.URL.RawQuery)
 		metadataStr = raw.Get("metadata")
 	}
-	logger.Infof("statusAllHandler: metadataStr='%s'", metadataStr)
+	logger.Debugf("statusAllHandler: metadataStr='%s'", metadataStr)
 
 	// Use raw string so filter works after RPC (map may not deserialize over the wire)
 	filter := types.NewStatusFilterWithMetadataStr(statusFilter, metadataStr)
@@ -974,7 +975,7 @@ func (api *API) statusAllHandler(w http.ResponseWriter, r *http.Request) {
 	// Parse metadata filter once for API-side filtering (used in closure; re-parsing is safe if metadataStr is set)
 	metadataFilter := types.MetadataFilterFromString(metadataStr)
 	hasMetadataFilter := len(metadataFilter) > 0
-	logger.Infof("statusAllHandler: hasMetadataFilter=%v, metadataFilter=%+v", hasMetadataFilter, metadataFilter)
+	logger.Debugf("statusAllHandler: hasMetadataFilter=%v, metadataFilter=%+v", hasMetadataFilter, metadataFilter)
 
 	var iter common.StreamIterator
 	in := make(chan types.StatusFilter, 1)
@@ -994,7 +995,7 @@ func (api *API) statusAllHandler(w http.ResponseWriter, r *http.Request) {
 					return nil, false, ctx.Err()
 				case p, ok := <-out:
 					if !ok {
-						logger.Infof("statusAllHandler: Finished streaming %d items (local)", count)
+						logger.Debugf("statusAllHandler: Finished streaming %d items (local)", count)
 						return nil, false, nil
 					}
 					// Normalize metadata to ensure JSON serialization works
@@ -1045,7 +1046,7 @@ func (api *API) statusAllHandler(w http.ResponseWriter, r *http.Request) {
 					return nil, false, ctx.Err()
 				case p, ok := <-out:
 					if !ok {
-						logger.Infof("statusAllHandler: Finished streaming %d items", count)
+						logger.Debugf("statusAllHandler: Finished streaming %d items", count)
 						return nil, false, nil
 					}
 					// Normalize metadata to ensure JSON serialization works

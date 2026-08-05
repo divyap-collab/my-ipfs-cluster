@@ -242,7 +242,7 @@ func (css *Consensus) setup() {
 		if err != nil {
 			logger.Error(err)
 		}
-		logger.Infof("new pin added: %s", pin.Cid)
+		logger.Debugf("new pin added: %s", pin.Cid)
 	}
 	opts.DeleteHook = func(k ds.Key) {
 		ctx, span := trace.StartSpan(css.ctx, "crdt/DeleteHook")
