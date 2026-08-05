@@ -677,7 +677,12 @@ func (api *API) SendResponse(
 		w.WriteHeader(status)
 
 		errorResp := api.config.APIErrorFunc(err, status)
-		api.config.Logger.Errorf("sending error response: %d: %s", status, err.Error())
+		// 404s are common during create→metadata races / CRDT lag; keep them off ERROR.
+		if status == http.StatusNotFound {
+			api.config.Logger.Debugf("sending error response: %d: %s", status, err.Error())
+		} else {
+			api.config.Logger.Errorf("sending error response: %d: %s", status, err.Error())
+		}
 
 		if err := enc.Encode(errorResp); err != nil {
 			api.config.Logger.Error(err)

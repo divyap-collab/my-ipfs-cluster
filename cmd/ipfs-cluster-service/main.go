@@ -800,8 +800,8 @@ func setupLogLevel(debug bool, l string) error {
 		compLogFacs[comp] = lvl
 	}
 
-	logLevel, ok := compLogFacs["all"]
-	if !ok {
+	logLevel, hasOverall := compLogFacs["all"]
+	if !hasOverall {
 		logLevel = defaultLogLevel
 	} else {
 		delete(compLogFacs, "all")
@@ -817,11 +817,16 @@ func setupLogLevel(debug bool, l string) error {
 		logfacs[identifier] = level
 	}
 
-	// Set the values for things not set by the user or for
-	// things set by "all".
-	for key := range ipfscluster.LoggingFacilities {
+	// Facilities not set by the user: use an overall --loglevel / "all" value
+	// when provided; otherwise honor per-facility defaults from LoggingFacilities
+	// (quieter chatty modules in production).
+	for key, defaultLvl := range ipfscluster.LoggingFacilities {
 		if _, ok := logfacs[key]; !ok {
-			logfacs[key] = logLevel
+			if hasOverall {
+				logfacs[key] = logLevel
+			} else {
+				logfacs[key] = defaultLvl
+			}
 		}
 	}
 

@@ -8,30 +8,34 @@ var logger = logging.Logger("cluster")
 
 // LoggingFacilities provides a list of logging identifiers
 // used by cluster and their default logging level.
+//
+// Chatty per-request / per-pin facilities default to ERROR so production
+// journald/rsyslog are not flooded under upload and metadata PATCH load.
+// Override with IPFS_CLUSTER_LOG_LEVEL (e.g. "info" or "error,crdt:info").
 var LoggingFacilities = map[string]string{
 	"cluster":      "INFO",
-	"restapi":      "INFO",
-	"restapilog":   "INFO",
-	"pinsvcapi":    "INFO",
-	"pinsvcapilog": "INFO",
-	"ipfsproxy":    "INFO",
-	"ipfsproxylog": "INFO",
-	"ipfshttp":     "INFO",
+	"restapi":      "ERROR",
+	"restapilog":   "ERROR",
+	"pinsvcapi":    "ERROR",
+	"pinsvcapilog": "ERROR",
+	"ipfsproxy":    "ERROR",
+	"ipfsproxylog": "ERROR",
+	"ipfshttp":     "ERROR",
 	"monitor":      "INFO",
-	"dsstate":      "INFO",
+	"dsstate":      "ERROR",
 	"raft":         "INFO",
-	"crdt":         "INFO",
-	"pintracker":   "INFO",
+	"crdt":         "ERROR",
+	"pintracker":   "ERROR",
 	"diskinfo":     "INFO",
-	"tags":         "INFO",
-	"apitypes":     "INFO",
+	"tags":         "ERROR",
+	"apitypes":     "ERROR",
 	"config":       "INFO",
-	"shardingdags": "INFO",
-	"singledags":   "INFO",
-	"adder":        "INFO",
-	"optracker":    "INFO",
-	"pstoremgr":    "INFO",
-	"allocator":    "INFO",
+	"shardingdags": "ERROR",
+	"singledags":   "ERROR",
+	"adder":        "ERROR",
+	"optracker":    "ERROR",
+	"pstoremgr":    "ERROR",
+	"allocator":    "ERROR",
 }
 
 // LoggingFacilitiesExtra provides logging identifiers
